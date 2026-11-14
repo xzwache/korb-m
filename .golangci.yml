@@ -1,0 +1,17 @@
+version: "2"
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - errorlint     # correct use of errors.Is / errors.As / %w
+    - gocritic
+    - gosec         # we'll do raw syscalls and unsafe later; worth the noise
+    - misspell
+    - revive
+    - unconvert
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
