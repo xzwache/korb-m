@@ -36,6 +36,7 @@ func main() {
 
 type config struct {
 	addr            string
+	debugAddr       string
 	mode            string
 	allowedOrigins  string
 	shutdownTimeout time.Duration
@@ -49,6 +50,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	flagSet := flag.NewFlagSet("korbd", flag.ContinueOnError)
 	flagSet.SetOutput(stderr)
 	flagSet.StringVar(&c.addr, "addr", ":8080", "listen address")
+	flagSet.StringVar(&c.debugAddr, "debug-addr", "", "pprof/expvar/stats address, e.g. 127.0.0.1:6060; empty disables. Never expose publicly")
 	flagSet.StringVar(&c.mode, "mode", "broadcast", "demo mode: echo or broadcast")
 	flagSet.StringVar(&c.allowedOrigins, "allowed-origins", "", "comma-separated allowed Origin values; empty allows all")
 	flagSet.DurationVar(&c.shutdownTimeout, "shutdown-timeout", 10*time.Second, "max time to wait for connections on shutdown")
@@ -87,10 +89,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, ready fun
 	cfg.server.Logger = logger
 	cfg.server.CheckOrigin = originChecker(cfg.allowedOrigins)
 
-	srv := gopc.New(echo.New(mode, logger), cfg.server)
+	app := echo.New(mode, logger)
+	srv := gopc.New(app, cfg.server)
 	ln, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		return err
+	}
+
+	if cfg.debugAddr != "" {
+		dln, err := net.Listen("tcp", cfg.debugAddr)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("debug listener: %w", err)
+		}
+		dsrv := newDebugServer(app.Len)
+		go func() { _ = dsrv.Serve(dln) }()
+		defer func() { _ = dsrv.Close() }()
+		logger.Info("debug server listening", "addr", dln.Addr().String())
 	}
 	logger.Info("korbd listening", "addr", ln.Addr().String(), "mode", cfg.mode, "version", version)
 	if ready != nil {

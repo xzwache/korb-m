@@ -41,8 +41,11 @@ type App struct {
 	conns map[uint64]transport.Conn
 }
 
-// New returns an App in the given mode.
+// New returns an App in the given mode. A nil log uses slog.Default().
 func New(mode Mode, log *slog.Logger) *App {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &App{mode: mode, log: log, conns: make(map[uint64]transport.Conn)}
 }
 
