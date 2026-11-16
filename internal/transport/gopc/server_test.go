@@ -12,6 +12,7 @@ import (
 
 	"github.com/xzwache/korb-m/internal/transport"
 	"github.com/xzwache/korb-m/internal/ws"
+	"github.com/xzwache/korb-m/internal/wstest"
 )
 
 const waitTimeout = 2 * time.Second
@@ -82,143 +83,39 @@ func startServer(t *testing.T, cfg Config, h transport.Handler) (*Server, string
 	return s, ln.Addr().String()
 }
 
-// --- test client ---
-
-type client struct {
-	t   *testing.T
-	nc  net.Conn
-	dec *ws.Decoder
-	buf []byte
-}
-
-func dial(t *testing.T, addr string) *client {
-	t.Helper()
-	nc, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = nc.Close() })
-
-	c := &client{t: t, nc: nc, dec: ws.NewDecoder(ws.SideClient, 1<<20)}
-	key := ws.NewKey()
-	c.write(ws.AppendRequest(nil, "test", "/ws", key))
-	for {
-		n, err := ws.ParseResponse(c.buf, key)
-		if err == nil {
-			c.buf = c.buf[n:]
-			return c
-		}
-		if !errors.Is(err, ws.ErrNeedMore) {
-			t.Fatalf("handshake: %v", err)
-		}
-		if err := c.fill(); err != nil {
-			t.Fatalf("handshake read: %v", err)
-		}
-	}
-}
-
-func (c *client) write(b []byte) {
-	c.t.Helper()
-	if _, err := c.nc.Write(b); err != nil {
-		c.t.Fatal(err)
-	}
-}
-
-func (c *client) send(op ws.Opcode, payload string) {
-	c.t.Helper()
-	key := [4]byte{1, 2, 3, 4}
-	b := ws.AppendHeader(nil, ws.Header{Fin: true, Opcode: op, Masked: true, Mask: key, Length: int64(len(payload))})
-	start := len(b)
-	b = append(b, payload...)
-	ws.Mask(key, 0, b[start:])
-	c.write(b)
-}
-
-func (c *client) fill() error {
-	_ = c.nc.SetReadDeadline(time.Now().Add(waitTimeout))
-	tmp := make([]byte, 4096)
-	n, err := c.nc.Read(tmp)
-	c.buf = append(c.buf, tmp[:n]...)
-	if n > 0 {
-		return nil
-	}
-	return err
-}
-
-func (c *client) read() (ws.Opcode, string, error) {
-	for {
-		m, n, err := c.dec.Next(c.buf)
-		c.buf = c.buf[n:]
-		if err == nil {
-			return m.Opcode, string(m.Payload), nil
-		}
-		if !errors.Is(err, ws.ErrNeedMore) {
-			return 0, "", err
-		}
-		if err := c.fill(); err != nil {
-			return 0, "", err
-		}
-	}
-}
-
-func (c *client) expect(op ws.Opcode, payload string) {
-	c.t.Helper()
-	gotOp, got, err := c.read()
-	if err != nil {
-		c.t.Fatalf("read: %v", err)
-	}
-	if gotOp != op || got != payload {
-		c.t.Fatalf("got %v %q, want %v %q", gotOp, got, op, payload)
-	}
-}
-
-func (c *client) expectClose(code ws.CloseCode) {
-	c.t.Helper()
-	op, p, err := c.read()
-	if err != nil {
-		c.t.Fatalf("read: %v", err)
-	}
-	if op != ws.OpClose {
-		c.t.Fatalf("got %v, want close", op)
-	}
-	if got, _, _ := ws.ParseClose([]byte(p)); got != code {
-		c.t.Fatalf("close code = %d, want %d", got, code)
-	}
-}
-
 // --- tests ---
 
 func TestEcho(t *testing.T) {
 	rec := newRecorder()
 	_, addr := startServer(t, Config{}, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	rec.wait(t, "open")
 
-	c.send(ws.OpText, "hello")
-	c.expect(ws.OpText, "hello")
-	c.send(ws.OpBinary, "\x00\x01")
-	c.expect(ws.OpBinary, "\x00\x01")
+	c.Send(ws.OpText, "hello")
+	c.Expect(ws.OpText, "hello")
+	c.Send(ws.OpBinary, "\x00\x01")
+	c.Expect(ws.OpBinary, "\x00\x01")
 }
 
 func TestPingPong(t *testing.T) {
 	_, addr := startServer(t, Config{}, newRecorder())
-	c := dial(t, addr)
-	c.send(ws.OpPing, "abc")
-	c.expect(ws.OpPong, "abc")
+	c := wstest.Dial(t, addr)
+	c.Send(ws.OpPing, "abc")
+	c.Expect(ws.OpPong, "abc")
 }
 
 func TestClientClose(t *testing.T) {
 	rec := newRecorder()
 	_, addr := startServer(t, Config{}, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	open := rec.wait(t, "open")
 
-	c.send(ws.OpClose, string(ws.AppendClose(nil, ws.CloseNormal, "bye")))
-	c.expectClose(ws.CloseNormal)
+	c.Send(ws.OpClose, string(ws.AppendClose(nil, ws.CloseNormal, "bye")))
+	c.ExpectClose(ws.CloseNormal)
 	if ev := rec.wait(t, "close"); ev.err != nil {
 		t.Errorf("OnClose err = %v, want nil", ev.err)
 	}
-	if _, _, err := c.read(); !errors.Is(err, io.EOF) {
+	if _, _, err := c.Read(); !errors.Is(err, io.EOF) {
 		t.Errorf("after close: err = %v, want EOF", err)
 	}
 	if err := open.conn.SendOrClose(ws.OpText, []byte("x")); !errors.Is(err, transport.ErrClosed) {
@@ -229,11 +126,11 @@ func TestClientClose(t *testing.T) {
 func TestProtocolError(t *testing.T) {
 	rec := newRecorder()
 	_, addr := startServer(t, Config{}, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	rec.wait(t, "open")
 
-	c.write(ws.AppendFrame(nil, ws.OpText, []byte("unmasked")))
-	c.expectClose(ws.CloseProtocolError)
+	c.Write(ws.AppendFrame(nil, ws.OpText, []byte("unmasked")))
+	c.ExpectClose(ws.CloseProtocolError)
 	if ev := rec.wait(t, "close"); !errors.Is(ev.err, ws.ErrMaskMismatch) {
 		t.Errorf("OnClose err = %v", ev.err)
 	}
@@ -241,9 +138,9 @@ func TestProtocolError(t *testing.T) {
 
 func TestMessageTooBig(t *testing.T) {
 	_, addr := startServer(t, Config{MaxMessageSize: 10}, newRecorder())
-	c := dial(t, addr)
-	c.send(ws.OpText, "12345678901")
-	c.expectClose(ws.CloseMessageTooBig)
+	c := wstest.Dial(t, addr)
+	c.Send(ws.OpText, "12345678901")
+	c.ExpectClose(ws.CloseMessageTooBig)
 }
 
 func TestSlowConsumer(t *testing.T) {
@@ -260,10 +157,10 @@ func TestSlowConsumer(t *testing.T) {
 		sendErr <- nil
 	}
 	_, addr := startServer(t, Config{SendQueueSize: 4, WriteTimeout: 200 * time.Millisecond}, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	rec.wait(t, "open")
 
-	c.send(ws.OpText, "flood me") // and never read
+	c.Send(ws.OpText, "flood me") // and never read
 	if err := <-sendErr; !errors.Is(err, transport.ErrSlowConsumer) {
 		t.Fatalf("Send err = %v, want ErrSlowConsumer", err)
 	}
@@ -276,7 +173,7 @@ func TestIdleTimeout(t *testing.T) {
 	rec := newRecorder()
 	cfg := Config{PingInterval: 20 * time.Millisecond, IdleTimeout: 100 * time.Millisecond}
 	_, addr := startServer(t, cfg, rec)
-	dial(t, addr) // never answers pings
+	wstest.Dial(t, addr) // never answers pings
 	rec.wait(t, "open")
 
 	if ev := rec.wait(t, "close"); !errors.Is(ev.err, transport.ErrIdleTimeout) {
@@ -288,16 +185,16 @@ func TestActiveClientStaysOpen(t *testing.T) {
 	rec := newRecorder()
 	cfg := Config{PingInterval: 20 * time.Millisecond, IdleTimeout: 100 * time.Millisecond}
 	_, addr := startServer(t, cfg, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	rec.wait(t, "open")
 
 	for deadline := time.Now().Add(400 * time.Millisecond); time.Now().Before(deadline); {
-		op, p, err := c.read()
+		op, p, err := c.Read()
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
 		if op == ws.OpPing {
-			c.send(ws.OpPong, p)
+			c.Send(ws.OpPong, p)
 		}
 	}
 	select {
@@ -355,7 +252,7 @@ func TestHandshakeRejected(t *testing.T) {
 func TestShutdown(t *testing.T) {
 	rec := newRecorder()
 	s, addr := startServer(t, Config{}, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	rec.wait(t, "open")
 
 	done := make(chan error, 1)
@@ -365,8 +262,8 @@ func TestShutdown(t *testing.T) {
 		done <- s.Shutdown(ctx)
 	}()
 
-	c.expectClose(ws.CloseGoingAway)
-	c.send(ws.OpClose, string(ws.AppendClose(nil, ws.CloseGoingAway, "")))
+	c.ExpectClose(ws.CloseGoingAway)
+	c.Send(ws.OpClose, string(ws.AppendClose(nil, ws.CloseGoingAway, "")))
 	if err := <-done; err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
@@ -382,9 +279,9 @@ func TestShutdownDoesNotWaitForBlockedHandler(t *testing.T) {
 	rec.onMessage = func(transport.Conn, ws.Opcode, []byte) { <-release }
 
 	s, addr := startServer(t, Config{}, rec)
-	c := dial(t, addr)
+	c := wstest.Dial(t, addr)
 	rec.wait(t, "open")
-	c.send(ws.OpText, "block")
+	c.Send(ws.OpText, "block")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
