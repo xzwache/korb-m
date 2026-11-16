@@ -30,6 +30,7 @@ var (
 	ErrNotUpgrade       = &HandshakeError{400, "not a websocket upgrade request"}
 	ErrBadKey           = &HandshakeError{400, "invalid Sec-WebSocket-Key"}
 	ErrBadVersion       = &HandshakeError{426, "unsupported Sec-WebSocket-Version"}
+	ErrOriginForbidden  = &HandshakeError{403, "origin not allowed"}
 )
 
 // Request is a parsed upgrade request. Fields point into the request head.
